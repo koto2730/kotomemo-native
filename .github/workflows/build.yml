@@ -4,7 +4,7 @@
 # (Gradle/jpackage) structure, translated to cargo / cargo-packager.
 #
 # Per-OS packaging format:
-#   windows-latest -> wix        (.msi, matches kotomemo's packageMsi)
+#   windows-latest -> nsis       (*-setup.exe, includes Explorer context menu & PATH registration)
 #   macos-latest    -> dmg
 #   ubuntu-22.04    -> appimage + deb
 
@@ -25,8 +25,8 @@ jobs:
         include:
           - os: windows-latest
             label: windows
-            formats: wix
-            artifactPath: target/release/*.msi
+            formats: nsis
+            artifactPath: target/release/*-setup.exe
           - os: macos-latest
             label: macos-arm64
             formats: dmg

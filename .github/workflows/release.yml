@@ -22,8 +22,8 @@ jobs:
         include:
           - os: windows-latest
             label: windows
-            formats: wix
-            artifactPath: target/release/*.msi
+            formats: nsis
+            artifactPath: target/release/*-setup.exe
           - os: macos-latest
             label: macos-arm64
             formats: dmg
