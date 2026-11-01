@@ -1,0 +1,12 @@
+pub mod api_preset_dialog;
+pub mod cursor_position;
+pub mod editor_font;
+pub mod editor_pane;
+pub mod find_replace_bar;
+pub mod images_view;
+pub mod save_first_dialog;
+pub mod send_palette;
+pub mod status_bar;
+pub mod suggested_filename;
+pub mod syntax_colors;
+pub mod tab_bar;

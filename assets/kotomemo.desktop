@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=kotomemo
+Comment=Fast, minimalist markdown note editor and personal knowledge base
+Exec=/usr/bin/kotomemo %F
+Icon=kotomemo
+Terminal=false
+Type=Application
+Categories=Utility;TextEditor;
+MimeType=text/plain;
+StartupWMClass=kotomemo

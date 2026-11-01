@@ -1,0 +1,66 @@
+[package]
+name = "kotomemo"
+version = "0.1.0"
+authors = ["koto2730oss"]
+edition = "2024"
+license = "MIT"
+
+
+[dependencies]
+arboard = "3.6.1"
+eframe = "0.36.1"
+egui = "0.36.1"
+image = "0.25.10"
+regex = "1.13.1"
+rfd = "0.17.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1"
+time = "0.3"
+ureq = "3.4.0"
+keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }
+
+[target."cfg(windows)".build-dependencies]
+winres = "0.1.12"
+
+[package.metadata.packager]
+product-name = "kotomemo"
+identifier = "com.ictglabo.kotomemo"
+authors = ["koto2730oss"]
+icons = ["icon.ico", "icon-source.png"]
+
+[package.metadata.packager.nsis]
+# インストール時・アンインストール時に実行される追加NSISセクション
+preinstall-section = '''
+Section "ContextMenuAndPath"
+  ; 1. ファイルを右クリック -> "Open with kotomemo"
+  WriteRegStr SHCTX "Software\Classes\*\shell\kotomemo" "" "Open with kotomemo"
+  WriteRegStr SHCTX "Software\Classes\*\shell\kotomemo" "Icon" "$\"$INSTDIR\${MAINBINARYNAME}.exe$\",0"
+  WriteRegStr SHCTX "Software\Classes\*\shell\kotomemo\command" "" "$\"$INSTDIR\${MAINBINARYNAME}.exe$\" $\"%1$\""
+
+  ; 4. ユーザー環境変数 Path に $INSTDIR を重複なしで追加
+  nsExec::ExecToLog 'powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command "$p = [Environment]::GetEnvironmentVariable(\"Path\", \"User\"); $dir = \"$INSTDIR\"; if (-not (($p -split \";\") -contains $dir)) { [Environment]::SetEnvironmentVariable(\"Path\", ($p.TrimEnd(\";\") + \";\" + $dir).TrimStart(\";\"), \"User\") }"'
+  SendMessage ${HWND_BROADCAST} ${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=5000
+SectionEnd
+
+Section "un.ContextMenuAndPath"
+  ; アンインストール時にコンテキストメニューと Path をクリーンアップ
+  DeleteRegKey SHCTX "Software\Classes\*\shell\kotomemo"
+
+  nsExec::ExecToLog 'powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command "$p = [Environment]::GetEnvironmentVariable(\"Path\", \"User\"); $dir = \"$INSTDIR\"; if ($p) { $new = (($p -split \";\") | Where-Object { $_ -and ($_ -ne $dir) }) -join \";\"; [Environment]::SetEnvironmentVariable(\"Path\", $new, \"User\") }"'
+  SendMessage ${HWND_BROADCAST} ${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=5000
+SectionEnd
+'''
+
+[package.metadata.deb]
+maintainer = "koto2730oss"
+depends = "$auto"
+section = "editors"
+priority = "optional"
+assets = [
+    # 実行バイナリ -> /usr/bin/kotomemo (自動的に PATH が通る)
+    ["target/release/kotomemo", "usr/bin/", "755"],
+    # デスクトップエントリ -> ファイル・フォルダ右クリックメニュー登録
+    ["assets/kotomemo.desktop", "usr/share/applications/", "644"],
+    # アプリアイコン
+    ["icon-source.png", "kotomemo.png", "644"],
+]

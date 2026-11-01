@@ -1,0 +1,75 @@
+# CI: build + tests + package the per-OS installer on every push to main
+# and on PRs targeting main. Does NOT attach to a GitHub Release - that
+# happens in release.yml (tag push only). Mirrors kotomemo's build.yml
+# (Gradle/jpackage) structure, translated to cargo / cargo-packager.
+#
+# Per-OS packaging format:
+#   windows-latest -> wix        (.msi, matches kotomemo's packageMsi)
+#   macos-latest    -> dmg
+#   ubuntu-22.04    -> appimage + deb
+
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows
+            formats: wix
+            artifactPath: target/release/*.msi
+          - os: macos-latest
+            label: macos-arm64
+            formats: dmg
+            artifactPath: target/release/*.dmg
+          # Pin to 22.04 (glibc 2.35) so the AppImage stays compatible with
+          # Ubuntu 22.04 LTS, Debian 12, Fedora 38+ and the rolling distros
+          # (see kotomemo's build.yml for the same reasoning).
+          - os: ubuntu-22.04
+            label: linux
+            formats: appimage,deb
+            artifactPath: |
+              target/release/*.AppImage
+              target/release/*.deb
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # rfd's native file dialogs need GTK3 on Linux; cargo-packager's
+      # AppImage/deb bundlers additionally need fuse for AppImage.
+      - name: Install Linux GUI dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libfuse2
+
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --locked
+
+      - name: Test
+        run: cargo test --release
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Package
+        run: cargo packager --release -f ${{ matrix.formats }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kotomemo-native-${{ matrix.label }}
+          path: ${{ matrix.artifactPath }}
+          if-no-files-found: error
