@@ -3,9 +3,10 @@ use crate::finder_state::FinderState;
 use crate::ui::cursor_position::CursorPosition;
 use crate::ui::syntax_colors;
 use crate::usecase::bulk_indent::{BulkIndentCommand, BulkIndentInput, IndentMode};
+use crate::usecase::find_replace::{self, FindMatchesInput};
 use crate::usecase::highlight;
 use egui::text::{CCursorRange, LayoutJob};
-use egui::{FontId, TextFormat};
+use egui::{Color32, FontId, TextFormat};
 
 #[derive(Debug, Clone)]
 pub struct EditorRenderConfig {
@@ -38,46 +39,6 @@ pub fn show(
     let id_salt = tab.contents.id.0.clone();
     let font_id = config.font_id.clone();
     let word_wrap = config.word_wrap;
-
-    let mut layouter = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
-        let text = buf.as_str();
-        let rule_set = highlight::rules_for(file_path.as_deref());
-        let tokens = highlight::highlight(text, rule_set.as_deref());
-        let chars: Vec<char> = text.chars().collect();
-
-        let mut job = LayoutJob::default();
-        let plain_format = |fid: &FontId| TextFormat {
-            font_id: fid.clone(),
-            color: base_color,
-            ..Default::default()
-        };
-
-        let mut pos = 0usize;
-        for token in &tokens {
-            if token.start > pos {
-                let plain: String = chars[pos..token.start].iter().collect();
-                job.append(&plain, 0.0, plain_format(&font_id));
-            }
-            let piece: String = chars[token.start..token.end_exclusive].iter().collect();
-            job.append(
-                &piece,
-                0.0,
-                TextFormat {
-                    font_id: font_id.clone(),
-                    color: syntax_colors::color_of(token.kind),
-                    ..Default::default()
-                },
-            );
-            pos = token.end_exclusive;
-        }
-        if pos < chars.len() {
-            let plain: String = chars[pos..].iter().collect();
-            job.append(&plain, 0.0, plain_format(&font_id));
-        }
-
-        job.wrap.max_width = if word_wrap { wrap_width } else { f32::INFINITY };
-        ui.fonts_mut(|f| f.layout_job(job))
-    };
 
     let (sel_min, sel_max) = tab.selection;
 
@@ -123,6 +84,138 @@ pub fn show(
     let previous_text = tab.text.clone();
     let previous_selection = tab.selection;
 
+    // Apply any pending jump/selection before building `layouter` so that
+    // active search match highlighting and cursor positioning take effect
+    // on this very same frame.
+    let jumped = tab.pending_selection.take();
+    if let Some((start, end)) = jumped {
+        tab.cursor_offset = start.max(end);
+        tab.selection = (start.min(end), start.max(end));
+    }
+
+    let current_selection = tab.selection;
+    let finder_visible = finder.visible;
+    let finder_query = finder.query.clone();
+    let finder_regex = finder.regex;
+    let finder_case = finder.case_sensitive;
+    let finder_scope = finder.scope;
+    let dark_mode = ui.visuals().dark_mode;
+
+    let mut layouter = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
+        let text = buf.as_str();
+        let rule_set = highlight::rules_for(file_path.as_deref());
+        let tokens = highlight::highlight(text, rule_set.as_deref());
+        let chars: Vec<char> = text.chars().collect();
+        let char_len = chars.len();
+
+        let search_matches: Vec<(usize, usize)> = if finder_visible && !finder_query.is_empty() {
+            let (s_from, s_to) = match finder_scope {
+                Some((s, e)) => (s.min(char_len), e.min(char_len)),
+                None => (0, char_len),
+            };
+            let sub: String = chars[s_from..s_to].iter().collect();
+            find_replace::find_matches(&FindMatchesInput {
+                text: &sub,
+                query: &finder_query,
+                regex: finder_regex,
+                case_sensitive: finder_case,
+            })
+            .into_iter()
+            .map(|(s, e)| (s + s_from, (e + 1 + s_from).min(char_len)))
+            .filter(|(s, e)| s < e)
+            .collect()
+        } else {
+            Vec::new()
+        };
+
+        let mut job = LayoutJob::default();
+        if char_len == 0 {
+            job.wrap.max_width = if word_wrap { wrap_width } else { f32::INFINITY };
+            return ui.fonts_mut(|f| f.layout_job(job));
+        }
+
+        let mut boundaries = Vec::with_capacity(2 + tokens.len() * 2 + search_matches.len() * 2);
+        boundaries.push(0);
+        boundaries.push(char_len);
+        for t in &tokens {
+            boundaries.push(t.start.min(char_len));
+            boundaries.push(t.end_exclusive.min(char_len));
+        }
+        for &(ms, me) in &search_matches {
+            boundaries.push(ms.min(char_len));
+            boundaries.push(me.min(char_len));
+        }
+        boundaries.sort_unstable();
+        boundaries.dedup();
+
+        let (match_bg, active_match_bg) = if dark_mode {
+            (
+                Color32::from_rgba_unmultiplied(210, 175, 30, 95),
+                Color32::from_rgba_unmultiplied(255, 140, 20, 185),
+            )
+        } else {
+            (
+                Color32::from_rgb(255, 235, 120),
+                Color32::from_rgb(255, 175, 55),
+            )
+        };
+
+        let mut tok_idx = 0usize;
+        let mut mat_idx = 0usize;
+        for pair in boundaries.windows(2) {
+            let (seg_start, seg_end) = (pair[0], pair[1]);
+            if seg_start >= seg_end {
+                continue;
+            }
+            while tok_idx < tokens.len() && tokens[tok_idx].end_exclusive <= seg_start {
+                tok_idx += 1;
+            }
+            let fg_color = if tok_idx < tokens.len()
+                && tokens[tok_idx].start <= seg_start
+                && seg_end <= tokens[tok_idx].end_exclusive
+            {
+                syntax_colors::color_of(tokens[tok_idx].kind)
+            } else {
+                base_color
+            };
+
+            while mat_idx < search_matches.len() && search_matches[mat_idx].1 <= seg_start {
+                mat_idx += 1;
+            }
+            let (bg_color, final_fg) = if mat_idx < search_matches.len()
+                && search_matches[mat_idx].0 <= seg_start
+                && seg_end <= search_matches[mat_idx].1
+            {
+                let (ms, me) = search_matches[mat_idx];
+                let is_active_match =
+                    current_selection.0 < current_selection.1 && current_selection == (ms, me);
+                if is_active_match {
+                    let contrast_fg = if dark_mode { Color32::WHITE } else { Color32::BLACK };
+                    (active_match_bg, contrast_fg)
+                } else {
+                    (match_bg, fg_color)
+                }
+            } else {
+                (Color32::TRANSPARENT, fg_color)
+            };
+
+            let piece: String = chars[seg_start..seg_end].iter().collect();
+            job.append(
+                &piece,
+                0.0,
+                TextFormat {
+                    font_id: font_id.clone(),
+                    color: final_fg,
+                    background: bg_color,
+                    ..Default::default()
+                },
+            );
+        }
+
+        job.wrap.max_width = if word_wrap { wrap_width } else { f32::INFINITY };
+        ui.fonts_mut(|f| f.layout_job(job))
+    };
+
     let row_height = ui
         .fonts_mut(|f| f.row_height(&config.font_id))
         .max(ui.text_style_height(&egui::TextStyle::Monospace))
@@ -159,6 +252,15 @@ pub fn show(
 
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
+                if let Some((start, end)) = jumped {
+                    let widget_id = ui.make_persistent_id(&id_salt);
+                    if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), widget_id) {
+                        let min = egui::text::CCursor::new(start);
+                        let max = egui::text::CCursor::new(end);
+                        state.cursor.set_char_range(Some(CCursorRange::two(min, max)));
+                        state.store(ui.ctx(), widget_id);
+                    }
+                }
                 let out = egui::TextEdit::multiline(&mut tab.text)
                     .id_salt(&id_salt)
                     .frame(egui::Frame::NONE.fill(editor_bg))
@@ -206,14 +308,32 @@ pub fn show(
         }
     });
 
-    let jumped = tab.pending_selection.take().inspect(|&(start, end)| {
-        let min = egui::text::CCursor::new(start);
-        let max = egui::text::CCursor::new(end);
-        output.state.cursor.set_char_range(Some(CCursorRange::two(min, max)));
+    if let Some((start, end)) = jumped {
+        let min = egui::text::CCursor::new(start.min(end));
+        let max = egui::text::CCursor::new(start.max(end));
+        output
+            .state
+            .cursor
+            .set_char_range(Some(CCursorRange::two(min, max)));
         output.state.store(ui.ctx(), output.response.id);
-        output.response.request_focus();
+
+        // Scroll the containing ScrollArea so the target match/cursor is visible.
+        let r1 = output
+            .galley
+            .pos_from_cursor(min)
+            .translate(output.galley_pos.to_vec2());
+        let r2 = output
+            .galley
+            .pos_from_cursor(max)
+            .translate(output.galley_pos.to_vec2());
+        let match_rect = r1.union(r2).expand2(egui::vec2(16.0, row_height * 1.5));
+        ui.scroll_to_rect(match_rect, Some(egui::Align::Center));
+
+        if !finder.visible {
+            output.response.request_focus();
+        }
         ui.ctx().request_repaint();
-    });
+    }
 
     tab.has_focus = output.response.has_focus();
 
@@ -223,11 +343,13 @@ pub fn show(
     if let Some((start, end)) = jumped {
         tab.cursor_offset = start.max(end);
         tab.selection = (start.min(end), start.max(end));
-    } else if let Some(range) = output.cursor_range {
-        let primary = range.primary.index.0;
-        let secondary = range.secondary.index.0;
-        tab.cursor_offset = primary;
-        tab.selection = (primary.min(secondary), primary.max(secondary));
+    } else if tab.has_focus {
+        if let Some(range) = output.cursor_range {
+            let primary = range.primary.index.0;
+            let secondary = range.secondary.index.0;
+            tab.cursor_offset = primary;
+            tab.selection = (primary.min(secondary), primary.max(secondary));
+        }
     }
 
     // Paint line numbers aligned with each logical line's visual row in `output.galley`.

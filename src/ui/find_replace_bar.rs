@@ -2,6 +2,7 @@ use crate::finder_state::{FinderMode, FinderState};
 
 pub enum FindReplaceAction {
     None,
+    QueryChanged,
     Find,
     ReplaceOne,
     ReplaceAll,
@@ -23,11 +24,18 @@ pub fn show(ui: &mut egui::Ui, finder: &mut FinderState) -> FindReplaceAction {
         if finder.refocus_query {
             query_resp.request_focus();
         }
+        if query_resp.changed() {
+            action = FindReplaceAction::QueryChanged;
+        }
         if ui.button("Find Next").clicked() {
             action = FindReplaceAction::Find;
         }
-        ui.checkbox(&mut finder.regex, "Regex");
-        ui.checkbox(&mut finder.case_sensitive, "Aa");
+        if ui.checkbox(&mut finder.regex, "Regex").changed() {
+            action = FindReplaceAction::QueryChanged;
+        }
+        if ui.checkbox(&mut finder.case_sensitive, "Aa").changed() {
+            action = FindReplaceAction::QueryChanged;
+        }
         if ui.button("Close").clicked() {
             action = FindReplaceAction::Close;
         }

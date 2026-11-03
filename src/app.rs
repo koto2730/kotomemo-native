@@ -148,6 +148,7 @@ impl EditorWindow {
 
     fn handle_dropped_files(&mut self, ui: &egui::Ui) {
         let dropped = ui.input(|i| i.raw.dropped_files.clone());
+        let mut opened_text_file = false;
         for file in dropped {
             let path = file.path();
             if path.is_file() {
@@ -161,10 +162,13 @@ impl EditorWindow {
                             self.state.send_status = Some(format!("Failed to open image: {e}"));
                         }
                     }
-                } else {
-                    let _ = self.state.open_file(path);
+                } else if self.state.open_file(path).is_ok() {
+                    opened_text_file = true;
                 }
             }
+        }
+        if opened_text_file {
+            self.state.close_initial_empty_if_possible();
         }
     }
 
@@ -265,9 +269,11 @@ impl EditorWindow {
             )
         });
 
+        let editor_has_focus = self.state.current().is_some_and(|t| t.has_focus);
         let escape = self.state.finder.visible
             && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape));
         let enter = self.state.finder.visible
+            && !editor_has_focus
             && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter));
 
         if equals || shift_minus {
@@ -314,6 +320,9 @@ impl EditorWindow {
                 if has_newline { Some((min, max)) } else { None }
             });
             self.state.finder.toggle_find(selection);
+            if self.state.finder.visible {
+                self.state.refresh_find_count();
+            }
         }
         if h {
             let selection = self.state.current().and_then(|t| {
@@ -323,9 +332,16 @@ impl EditorWindow {
                 if has_newline { Some((min, max)) } else { None }
             });
             self.state.finder.toggle_replace(selection);
+            if self.state.finder.visible {
+                self.state.refresh_find_count();
+            }
         }
         if escape {
             self.state.finder.hide();
+            if let Some(tab) = self.state.current_mut() {
+                tab.request_focus = true;
+                tab.pending_selection = Some(tab.selection);
+            }
         }
         if enter {
             use crate::finder_state::FinderMode;
@@ -519,11 +535,17 @@ impl EditorWindow {
                     if ui.button("Find…").clicked() {
                         let selection = self.state.current().map(|t| t.selection);
                         self.state.finder.toggle_find(selection);
+                        if self.state.finder.visible {
+                            self.state.refresh_find_count();
+                        }
                         ui.close();
                     }
                     if ui.button("Replace…").clicked() {
                         let selection = self.state.current().map(|t| t.selection);
                         self.state.finder.toggle_replace(selection);
+                        if self.state.finder.visible {
+                            self.state.refresh_find_count();
+                        }
                         ui.close();
                     }
                     ui.separator();
@@ -596,6 +618,62 @@ impl EditorWindow {
                     {
                         self.state.untile_tabs();
                         ui.close();
+                    }
+                    if ui
+                        .add_enabled(
+                            self.state.is_tiled(),
+                            egui::Button::selectable(
+                                self.state.sync_scroll_tiled,
+                                "Sync Scroll in Tiled View",
+                            ),
+                        )
+                        .on_hover_text(
+                            "Synchronize scrolling across tiled tabs relative to their line positions when turned ON",
+                        )
+                        .clicked()
+                    {
+                        let font_id = FontId::new(
+                            self.state.effective_font_size(),
+                            self.state.editor_font.family.to_egui_family(),
+                        );
+                        let rh = ui
+                            .fonts_mut(|f| f.row_height(&font_id))
+                            .max(ui.text_style_height(&egui::TextStyle::Monospace))
+                            .max(1.0);
+                        self.state
+                            .set_sync_scroll_tiled(!self.state.sync_scroll_tiled, rh);
+                        ui.close();
+                    }
+                    if self.state.is_tiled() {
+                        let active_col = self
+                            .state
+                            .tiled_tabs
+                            .iter()
+                            .position(|&i| i == self.state.selected_index);
+                        if ui
+                            .add_enabled(
+                                active_col.is_some_and(|c| c > 0),
+                                egui::Button::new("◀ Move Active Pane Left"),
+                            )
+                            .clicked()
+                        {
+                            if let Some(c) = active_col {
+                                self.state.move_tiled_tab(c, -1);
+                            }
+                            ui.close();
+                        }
+                        if ui
+                            .add_enabled(
+                                active_col.is_some_and(|c| c + 1 < self.state.tiled_tabs.len()),
+                                egui::Button::new("▶ Move Active Pane Right"),
+                            )
+                            .clicked()
+                        {
+                            if let Some(c) = active_col {
+                                self.state.move_tiled_tab(c, 1);
+                            }
+                            ui.close();
+                        }
                     }
                     ui.separator();
                     if ui
@@ -871,6 +949,17 @@ impl EditorWindow {
                 TabBarAction::TileSelected => self.state.tile_selected_tabs(),
                 TabBarAction::TileAll => self.state.tile_all_tabs(),
                 TabBarAction::Untile => self.state.untile_tabs(),
+                TabBarAction::SetSyncScroll(enabled) => {
+                    let font_id = FontId::new(
+                        self.state.effective_font_size(),
+                        self.state.editor_font.family.to_egui_family(),
+                    );
+                    let rh = ui
+                        .fonts_mut(|f| f.row_height(&font_id))
+                        .max(ui.text_style_height(&egui::TextStyle::Monospace))
+                        .max(1.0);
+                    self.state.set_sync_scroll_tiled(enabled, rh);
+                }
                 TabBarAction::DetachToNewWindow(i) => {
                     win_cmd = WindowCommand::DetachTab {
                         source_viewport: self.viewport_id,
@@ -893,10 +982,17 @@ impl EditorWindow {
 
             if self.state.finder.visible {
                 match find_replace_bar::show(ui, &mut self.state.finder) {
+                    FindReplaceAction::QueryChanged => self.state.refresh_find_count(),
                     FindReplaceAction::Find => self.state.run_find(),
                     FindReplaceAction::ReplaceOne => self.state.run_replace_one(),
                     FindReplaceAction::ReplaceAll => self.state.run_replace_all(),
-                    FindReplaceAction::Close => self.state.finder.hide(),
+                    FindReplaceAction::Close => {
+                        self.state.finder.hide();
+                        if let Some(tab) = self.state.current_mut() {
+                            tab.request_focus = true;
+                            tab.pending_selection = Some(tab.selection);
+                        }
+                    }
                     FindReplaceAction::None => {}
                 }
             }
@@ -1188,6 +1284,10 @@ impl EditorWindow {
             self.state.effective_font_size(),
             self.state.editor_font.family.to_egui_family(),
         );
+        let row_height = ui
+            .fonts_mut(|f| f.row_height(&font_id))
+            .max(ui.text_style_height(&egui::TextStyle::Monospace))
+            .max(1.0);
         let attachments_folder = self.state.app_config.attachments_folder.clone();
         let show_line_numbers = self.state.show_line_numbers;
         let word_wrap = self.state.word_wrap;
@@ -1196,6 +1296,7 @@ impl EditorWindow {
         let mut focus_tab_req: Option<(usize, bool)> = None;
         let mut untile_one_req: Option<usize> = None;
         let mut close_tab_req: Option<usize> = None;
+        let mut move_tiled_req: Option<(usize, isize)> = None;
 
         let central_frame = egui::Frame::central_panel(ui.style())
             .fill(ui.visuals().extreme_bg_color);
@@ -1212,83 +1313,130 @@ impl EditorWindow {
             };
 
             if tiled_indices.len() >= 2 {
-                ui.columns(tiled_indices.len(), |columns| {
+                let num_tiled = tiled_indices.len();
+                ui.columns(num_tiled, |columns| {
                     for (col_idx, &tab_idx) in tiled_indices.iter().enumerate() {
                         let col_ui = &mut columns[col_idx];
+                        // `Ui::columns` sets `max_rect` per column but inherits the full
+                        // parent `clip_rect`. Clip each column to its own `max_rect` so
+                        // later columns (and their background fills) never paint over
+                        // earlier columns to their left.
+                        let col_clip = col_ui.clip_rect().intersect(col_ui.max_rect());
+                        col_ui.set_clip_rect(col_clip);
+
                         let is_active = tab_idx == self.state.selected_index;
-
-                        col_ui.horizontal(|ui| {
-                            let (title, view_mode) = {
-                                let tab = &self.state.tabs[tab_idx];
-                                let mark = if tab.contents.is_dirty { " ●" } else { "" };
-                                (format!("{}{mark}", tab.contents.display_name()), tab.view_mode)
-                            };
-                            let mut label = egui::RichText::new(title);
-                            if is_active {
-                                label = label.strong();
-                            }
-                            if ui
-                                .selectable_label(is_active, label)
-                                .on_hover_text("Click to focus this pane")
-                                .clicked()
-                            {
-                                focus_tab_req = Some((tab_idx, true));
-                            }
-
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui.small_button("×").on_hover_text("Close tab").clicked() {
-                                        close_tab_req = Some(tab_idx);
-                                    }
-                                    if ui
-                                        .small_button("−")
-                                        .on_hover_text(
-                                            "Remove from side-by-side view (keep tab open)",
-                                        )
-                                        .clicked()
-                                    {
-                                        untile_one_req = Some(tab_idx);
-                                    }
-                                    let mode_label = match view_mode {
-                                        TabViewMode::Text => "Img",
-                                        TabViewMode::Images => "Txt",
-                                    };
-                                    if ui
-                                        .small_button(mode_label)
-                                        .on_hover_text("Toggle Text / Images view")
-                                        .clicked()
-                                    {
-                                        if let Some(tab) = self.state.tabs.get_mut(tab_idx) {
-                                            tab.view_mode = match tab.view_mode {
-                                                TabViewMode::Text => TabViewMode::Images,
-                                                TabViewMode::Images => TabViewMode::Text,
-                                            };
-                                        }
-                                    }
-                                },
-                            );
-                        });
-                        col_ui.separator();
-
-                        let viewport_rect = col_ui.available_rect_before_wrap();
-                        let render_config = editor_pane::EditorRenderConfig {
-                            font_id: font_id.clone(),
-                            show_line_numbers,
-                            word_wrap,
-                            viewport_height: viewport_rect.height(),
-                            viewport_left: viewport_rect.left(),
-                        };
-
-                        let view_mode = self.state.tabs[tab_idx].view_mode;
                         let scroll_id = self.state.tabs[tab_idx].contents.id.0.clone();
-                        match view_mode {
-                            TabViewMode::Text => {
-                                let mut action = editor_pane::EditorPaneAction::None;
-                                egui::ScrollArea::new([!word_wrap, true])
-                                    .id_salt(("editor_scroll_tiled", &scroll_id, col_idx))
-                                    .auto_shrink([false, false])
-                                    .show(col_ui, |ui| {
+
+                        col_ui.push_id(("tiled_col", &scroll_id, col_idx), |col_ui| {
+                            col_ui.horizontal(|ui| {
+                                let (title, hover_path, view_mode) = {
+                                    let tab = &self.state.tabs[tab_idx];
+                                    let mark = if tab.contents.is_dirty { " ●" } else { "" };
+                                    let base_title = self.state.tab_title(tab_idx);
+                                    let hover = match &tab.contents.file_path {
+                                        Some(p) => format!("{}\nClick to focus this pane", p.display()),
+                                        None => "Click to focus this pane".to_string(),
+                                    };
+                                    (format!("{base_title}{mark}"), hover, tab.view_mode)
+                                };
+                                let mut label = egui::RichText::new(title);
+                                if is_active {
+                                    label = label.strong();
+                                }
+                                if ui
+                                    .selectable_label(is_active, label)
+                                    .on_hover_text(hover_path)
+                                    .clicked()
+                                {
+                                    focus_tab_req = Some((tab_idx, true));
+                                }
+
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.small_button("×").on_hover_text("Close tab").clicked() {
+                                            close_tab_req = Some(tab_idx);
+                                        }
+                                        if ui
+                                            .small_button("−")
+                                            .on_hover_text(
+                                                "Remove from side-by-side view (keep tab open)",
+                                            )
+                                            .clicked()
+                                        {
+                                            untile_one_req = Some(tab_idx);
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                col_idx + 1 < num_tiled,
+                                                egui::Button::new("▶").small(),
+                                            )
+                                            .on_hover_text("Move this pane right (swap with right neighbor)")
+                                            .clicked()
+                                        {
+                                            move_tiled_req = Some((col_idx, 1));
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                col_idx > 0,
+                                                egui::Button::new("◀").small(),
+                                            )
+                                            .on_hover_text("Move this pane left (swap with left neighbor)")
+                                            .clicked()
+                                        {
+                                            move_tiled_req = Some((col_idx, -1));
+                                        }
+                                        let mode_label = match view_mode {
+                                            TabViewMode::Text => "Img",
+                                            TabViewMode::Images => "Txt",
+                                        };
+                                        if ui
+                                            .small_button(mode_label)
+                                            .on_hover_text("Toggle Text / Images view")
+                                            .clicked()
+                                        {
+                                            if let Some(tab) = self.state.tabs.get_mut(tab_idx) {
+                                                tab.view_mode = match tab.view_mode {
+                                                    TabViewMode::Text => TabViewMode::Images,
+                                                    TabViewMode::Images => TabViewMode::Text,
+                                                };
+                                            }
+                                        }
+                                    },
+                                );
+                            });
+                            col_ui.separator();
+
+                            let viewport_rect = col_ui.available_rect_before_wrap();
+                            let render_config = editor_pane::EditorRenderConfig {
+                                font_id: font_id.clone(),
+                                show_line_numbers,
+                                word_wrap,
+                                viewport_height: viewport_rect.height(),
+                                viewport_left: viewport_rect.left(),
+                            };
+
+                            let view_mode = self.state.tabs[tab_idx].view_mode;
+                            match view_mode {
+                                TabViewMode::Text => {
+                                    let mut action = editor_pane::EditorPaneAction::None;
+                                    let sync_enabled = self.state.sync_scroll_tiled;
+                                    let desired_y = if sync_enabled {
+                                        ((self.state.tabs[tab_idx].sync_anchor_line
+                                            + self.state.sync_scroll_delta_lines)
+                                            * row_height)
+                                            .max(0.0)
+                                    } else {
+                                        0.0
+                                    };
+                                    let mut scroll_area = egui::ScrollArea::new([!word_wrap, true])
+                                        .id_salt(("editor_scroll_tiled", &scroll_id, col_idx))
+                                        .auto_shrink([false, false])
+                                        .animated(false);
+                                    if sync_enabled {
+                                        scroll_area = scroll_area.vertical_scroll_offset(desired_y);
+                                    }
+                                    let scroll_out = scroll_area.show(col_ui, |ui| {
                                         let finder = &mut self.state.finder;
                                         if let Some(tab) = self.state.tabs.get_mut(tab_idx) {
                                             action =
@@ -1300,24 +1448,42 @@ impl EditorWindow {
                                             }
                                         }
                                     });
-                                if matches!(
-                                    action,
-                                    editor_pane::EditorPaneAction::PasteImageRequested
-                                ) {
-                                    paste_image_for_tab = Some(tab_idx);
+                                    let new_offset_y = scroll_out.state.offset.y;
+                                    if sync_enabled {
+                                        let max_offset_y = (scroll_out.content_size.y
+                                            - scroll_out.inner_rect.height())
+                                        .max(0.0);
+                                        let expected_clamped_y =
+                                            desired_y.clamp(0.0, max_offset_y);
+                                        if (new_offset_y - expected_clamped_y).abs() > 0.5 {
+                                            self.state.sync_scroll_delta_lines = (new_offset_y
+                                                / row_height)
+                                                - self.state.tabs[tab_idx].sync_anchor_line;
+                                            col_ui.ctx().request_repaint();
+                                        }
+                                    }
+                                    if let Some(tab) = self.state.tabs.get_mut(tab_idx) {
+                                        tab.scroll_offset_y = new_offset_y;
+                                    }
+                                    if matches!(
+                                        action,
+                                        editor_pane::EditorPaneAction::PasteImageRequested
+                                    ) {
+                                        paste_image_for_tab = Some(tab_idx);
+                                    }
+                                }
+                                TabViewMode::Images => {
+                                    if let Some(tab) = self.state.tabs.get(tab_idx) {
+                                        images_view::show(
+                                            col_ui,
+                                            tab,
+                                            &attachments_folder,
+                                            &mut self.images,
+                                        );
+                                    }
                                 }
                             }
-                            TabViewMode::Images => {
-                                if let Some(tab) = self.state.tabs.get(tab_idx) {
-                                    images_view::show(
-                                        col_ui,
-                                        tab,
-                                        &attachments_folder,
-                                        &mut self.images,
-                                    );
-                                }
-                            }
-                        }
+                        });
                     }
                 });
             } else {
@@ -1344,15 +1510,19 @@ impl EditorWindow {
                             .map(|t| t.contents.id.0.clone())
                             .unwrap_or_default();
                         let mut action = editor_pane::EditorPaneAction::None;
-                        egui::ScrollArea::new([!word_wrap, true])
+                        let scroll_out = egui::ScrollArea::new([!word_wrap, true])
                             .id_salt(("editor_scroll_single", &scroll_id))
                             .auto_shrink([false, false])
+                            .animated(false)
                             .show(ui, |ui| {
                                 let finder = &mut self.state.finder;
                                 if let Some(tab) = self.state.tabs.get_mut(selected_index) {
                                     action = editor_pane::show(ui, tab, &render_config, finder);
                                 }
                             });
+                        if let Some(tab) = self.state.tabs.get_mut(selected_index) {
+                            tab.scroll_offset_y = scroll_out.state.offset.y;
+                        }
                         if matches!(action, editor_pane::EditorPaneAction::PasteImageRequested) {
                             paste_image_for_tab = Some(selected_index);
                         }
@@ -1365,6 +1535,10 @@ impl EditorWindow {
                 }
             }
         });
+
+        if let Some((col_idx, delta)) = move_tiled_req {
+            self.state.move_tiled_tab(col_idx, delta);
+        }
 
         if let Some((tab_idx, req_focus)) = focus_tab_req {
             self.state.selected_index = tab_idx;

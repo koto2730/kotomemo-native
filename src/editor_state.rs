@@ -42,6 +42,11 @@ pub struct TabState {
     pub view_mode: TabViewMode,
     pub has_focus: bool,
     pub request_focus: bool,
+    /// Last rendered vertical scroll offset (in points) of this tab's editor ScrollArea.
+    pub scroll_offset_y: f32,
+    /// Anchor top line (`scroll_offset_y / row_height`) captured when synchronized
+    /// scrolling across tiled tabs is turned ON.
+    pub sync_anchor_line: f32,
     undo_stack: Vec<String>,
     redo_stack: Vec<String>,
 }
@@ -57,6 +62,8 @@ impl TabState {
             view_mode: TabViewMode::Text,
             has_focus: false,
             request_focus: false,
+            scroll_offset_y: 0.0,
+            sync_anchor_line: 0.0,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         }
@@ -151,6 +158,11 @@ pub struct EditorState {
     /// Tab indices currently displayed side-by-side horizontally. When
     /// `tiled_tabs.len() >= 2`, the editor splits into N horizontal columns.
     pub tiled_tabs: Vec<usize>,
+    /// Whether vertical scrolling is synchronized across tiled tabs relative
+    /// to each tab's anchor line when the checkbox was turned ON.
+    pub sync_scroll_tiled: bool,
+    /// Relative scroll delta (in lines) from each tiled tab's `sync_anchor_line`.
+    pub sync_scroll_delta_lines: f32,
     pub show_line_numbers: bool,
     pub word_wrap: bool,
     pub editor_font: EditorFont,
@@ -208,6 +220,8 @@ impl EditorState {
             selected_index: 0,
             selected_tabs: Vec::new(),
             tiled_tabs: Vec::new(),
+            sync_scroll_tiled: false,
+            sync_scroll_delta_lines: 0.0,
             show_line_numbers,
             word_wrap,
             editor_font,
@@ -259,6 +273,64 @@ impl EditorState {
 
     pub fn is_tiled(&self) -> bool {
         self.tiled_tabs.len() >= 2
+    }
+
+    /// Returns the display title for `tabs[index]`. When two or more open tabs
+    /// share the same filename (e.g. `dirA/memo.txt` and `dirB/memo.txt`),
+    /// appends the parent directory name (`memo.txt (dirA)`) to disambiguate them.
+    pub fn tab_title(&self, index: usize) -> String {
+        let Some(tab) = self.tabs.get(index) else {
+            return String::new();
+        };
+        let name = tab.contents.display_name();
+        let has_duplicate_name = self
+            .tabs
+            .iter()
+            .enumerate()
+            .any(|(i, t)| i != index && t.contents.display_name() == name);
+        if has_duplicate_name {
+            if let Some(parent) = tab
+                .contents
+                .file_path
+                .as_deref()
+                .and_then(|p| p.parent())
+                .and_then(|p| p.file_name().or_else(|| p.as_os_str().to_str().map(std::ffi::OsStr::new)))
+                .and_then(|s| s.to_str())
+                .filter(|s| !s.is_empty())
+            {
+                return format!("{name} ({parent})");
+            }
+        }
+        name
+    }
+
+    /// Enables or disables relative synchronized scrolling across tiled tabs.
+    /// When turned ON, captures each tab's current top line (`scroll_offset_y / row_height`)
+    /// as its anchor so scrolling any pane scrolls all tiled panes by the same relative line offset.
+    pub fn set_sync_scroll_tiled(&mut self, enabled: bool, row_height: f32) {
+        self.sync_scroll_tiled = enabled;
+        if enabled {
+            let rh = row_height.max(1.0);
+            self.sync_scroll_delta_lines = 0.0;
+            for tab in &mut self.tabs {
+                tab.sync_anchor_line = (tab.scroll_offset_y / rh).max(0.0);
+            }
+        }
+    }
+
+    /// Reorders a tiled pane left (`delta = -1`) or right (`delta = 1`) within `tiled_tabs`.
+    pub fn move_tiled_tab(&mut self, col_idx: usize, delta: isize) {
+        let len = self.tiled_tabs.len();
+        if col_idx >= len {
+            return;
+        }
+        let target = col_idx as isize + delta;
+        if target < 0 || target as usize >= len {
+            return;
+        }
+        let target_idx = target as usize;
+        self.tiled_tabs.swap(col_idx, target_idx);
+        self.selected_tabs = self.tiled_tabs.clone();
     }
 
     pub fn select_single_tab(&mut self, index: usize) {
@@ -385,6 +457,8 @@ impl EditorState {
             selected_index: 0,
             selected_tabs: vec![0],
             tiled_tabs: Vec::new(),
+            sync_scroll_tiled: false,
+            sync_scroll_delta_lines: 0.0,
             show_line_numbers: self.show_line_numbers,
             word_wrap: self.word_wrap,
             editor_font: self.editor_font.clone(),
@@ -459,9 +533,17 @@ impl EditorState {
     }
 
     /// Reorders a tab within the tab bar from `from` to `to`.
+    /// If both tabs are currently displayed in tiled view, their tiled pane
+    /// positions are also swapped so dragging tabs in the tab bar reorders tiled panes.
     pub fn move_tab_within(&mut self, from: usize, to: usize) {
         if from >= self.tabs.len() || to >= self.tabs.len() || from == to {
             return;
+        }
+        if let (Some(pos_a), Some(pos_b)) = (
+            self.tiled_tabs.iter().position(|&i| i == from),
+            self.tiled_tabs.iter().position(|&i| i == to),
+        ) {
+            self.tiled_tabs.swap(pos_a, pos_b);
         }
         let remap = |idx: usize| -> usize {
             if idx == from {
@@ -714,8 +796,34 @@ impl EditorState {
         self.finder.wrapped_around = next_after.is_none();
 
         if let Some(tab) = self.tabs.get_mut(index) {
-            tab.pending_selection = Some((target.0, target.1 + 1));
+            let sel = (target.0, target.1 + 1);
+            tab.selection = sel;
+            tab.cursor_offset = sel.1;
+            tab.pending_selection = Some(sel);
         }
+    }
+
+    /// Recomputes `finder.last_match_count` for the active tab without moving
+    /// the editor focus or advancing past the current match.
+    pub fn refresh_find_count(&mut self) {
+        let index = self.selected_index;
+        let Some(tab) = self.tabs.get(index) else { return };
+        let chars: Vec<char> = tab.text.chars().collect();
+        let len = chars.len();
+        let (search_from, search_to) = match self.finder.scope {
+            Some((s, e)) => (s.min(len), e.min(len)),
+            None => (0, len),
+        };
+        let substring: String = chars[search_from..search_to].iter().collect();
+        let raw_matches = find_replace::find_matches(&FindMatchesInput {
+            text: &substring,
+            query: &self.finder.query,
+            regex: self.finder.regex,
+            case_sensitive: self.finder.case_sensitive,
+        });
+        self.finder.last_match_count = raw_matches.len();
+        self.finder.last_replace_count = -1;
+        self.finder.wrapped_around = false;
     }
 
     /// Replaces only when the current selection is *exactly* one whole
@@ -1133,5 +1241,142 @@ mod tests {
         assert_eq!(win1.tabs.len(), 3);
         assert_eq!(win1.tabs[2].text, "gamma");
         assert_eq!(win1.selected_index, 2);
+    }
+
+    #[test]
+    fn find_next_cycles_through_all_matches_in_egui() {
+        let mut state = EditorState::new();
+        state.tabs[0].apply_text("hello world\nhello rust\nhello egui".to_string());
+        state.finder.visible = true;
+        state.finder.query = "hello".to_string();
+
+        let ctx = egui::Context::default();
+        let config = crate::ui::editor_pane::EditorRenderConfig {
+            font_id: egui::FontId::monospace(14.0),
+            show_line_numbers: true,
+            word_wrap: true,
+            viewport_height: 400.0,
+            viewport_left: 0.0,
+        };
+
+        // Frame 0: initial render
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let tab = &mut state.tabs[0];
+            crate::ui::editor_pane::show(ui, tab, &config, &mut state.finder);
+        });
+        out.textures_delta.clear();
+        assert_eq!(state.tabs[0].selection, (0, 0));
+
+        // 1st Find Next -> (0, 5)
+        state.run_find();
+        assert_eq!(state.tabs[0].selection, (0, 5));
+        for _ in 0..2 {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let tab = &mut state.tabs[0];
+                crate::ui::editor_pane::show(ui, tab, &config, &mut state.finder);
+            });
+            out.textures_delta.clear();
+        }
+        assert_eq!(state.tabs[0].selection, (0, 5));
+
+        // 2nd Find Next -> (12, 17)
+        state.run_find();
+        assert_eq!(state.tabs[0].selection, (12, 17));
+        for _ in 0..2 {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let tab = &mut state.tabs[0];
+                crate::ui::editor_pane::show(ui, tab, &config, &mut state.finder);
+            });
+            out.textures_delta.clear();
+        }
+        assert_eq!(state.tabs[0].selection, (12, 17));
+
+        // 3rd Find Next -> (23, 28)
+        state.run_find();
+        assert_eq!(state.tabs[0].selection, (23, 28));
+        assert!(!state.finder.wrapped_around);
+
+        // 4th Find Next -> wraps around to (0, 5)
+        state.run_find();
+        assert_eq!(state.tabs[0].selection, (0, 5));
+        assert!(state.finder.wrapped_around);
+    }
+
+    #[test]
+    fn duplicate_filenames_disambiguated_and_tiled_swap_and_sync_scroll() {
+        let mut state = EditorState::new();
+        state.tabs[0].contents.file_path = Some(PathBuf::from("/workspace/dir_a/notes.txt"));
+        state.tabs[0].scroll_offset_y = 140.0;
+
+        state.new_tab();
+        state.tabs[1].contents.file_path = Some(PathBuf::from("/workspace/dir_b/notes.txt"));
+        state.tabs[1].scroll_offset_y = 280.0;
+
+        // Disambiguates duplicate filenames using parent folder name
+        assert_eq!(state.tab_title(0), "notes.txt (dir_a)");
+        assert_eq!(state.tab_title(1), "notes.txt (dir_b)");
+
+        // Tile both tabs and swap their pane order
+        state.tile_all_tabs();
+        assert_eq!(state.tiled_tabs, vec![0, 1]);
+        state.move_tiled_tab(0, 1);
+        assert_eq!(state.tiled_tabs, vec![1, 0]);
+        state.move_tiled_tab(1, -1);
+        assert_eq!(state.tiled_tabs, vec![0, 1]);
+
+        // Reordering tabs in the tab bar while tiled also swaps the displayed tiled panes
+        state.move_tab_within(0, 1);
+        assert_eq!(state.tiled_tabs, vec![0, 1]);
+        assert_eq!(state.tab_title(state.tiled_tabs[0]), "notes.txt (dir_b)");
+        assert_eq!(state.tab_title(state.tiled_tabs[1]), "notes.txt (dir_a)");
+
+        // Turning ON sync scroll snapshots each tab's current line anchor
+        state.set_sync_scroll_tiled(true, 14.0);
+        assert!(state.sync_scroll_tiled);
+        assert_eq!(state.sync_scroll_delta_lines, 0.0);
+        assert!((state.tabs[0].sync_anchor_line - 20.0).abs() < 1e-4);
+        assert!((state.tabs[1].sync_anchor_line - 10.0).abs() < 1e-4);
+
+        // Verify that rendering two tiled columns clips each column's rect so the
+        // right column never paints its background over the left column.
+        let ctx = egui::Context::default();
+        let mut col_clips = Vec::new();
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.columns(2, |columns| {
+                for (col_idx, col_ui) in columns.iter_mut().enumerate() {
+                    let col_clip = col_ui.clip_rect().intersect(col_ui.max_rect());
+                    col_ui.set_clip_rect(col_clip);
+                    let viewport_rect = col_ui.available_rect_before_wrap();
+                    let cfg = crate::ui::editor_pane::EditorRenderConfig {
+                        font_id: egui::FontId::monospace(14.0),
+                        show_line_numbers: true,
+                        word_wrap: true,
+                        viewport_height: viewport_rect.height(),
+                        viewport_left: viewport_rect.left(),
+                    };
+                    egui::ScrollArea::new([false, true])
+                        .id_salt(("test_tiled_scroll", col_idx))
+                        .auto_shrink([false, false])
+                        .vertical_scroll_offset(1000.0)
+                        .show(col_ui, |ui| {
+                            let tab = &mut state.tabs[col_idx];
+                            crate::ui::editor_pane::show(ui, tab, &cfg, &mut state.finder);
+                            col_clips.push(ui.clip_rect());
+                        });
+                }
+            });
+        });
+        out.textures_delta.clear();
+        assert_eq!(col_clips.len(), 2);
+        assert!(
+            col_clips[0].height() > 100.0 && col_clips[1].height() > 100.0,
+            "clip_rect must remain non-empty when scrolled down: {:?}",
+            col_clips
+        );
+        assert!(
+            col_clips[0].right() <= col_clips[1].left() + 1.0,
+            "left and right tiled pane clip_rects must not overlap: {:?}",
+            col_clips
+        );
     }
 }

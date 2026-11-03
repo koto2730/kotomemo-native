@@ -10,6 +10,7 @@ pub enum TabBarAction {
     TileSelected,
     TileAll,
     Untile,
+    SetSyncScroll(bool),
     DetachToNewWindow(usize),
     MoveToWindow {
         tab_index: usize,
@@ -48,118 +49,127 @@ pub fn show(
                 let is_tiled = state.is_tiled();
 
                 for (i, tab) in state.tabs.iter().enumerate() {
-                    let is_active = i == state.selected_index;
-                    let is_in_multi = multi_count > 1 && state.selected_tabs.contains(&i);
-                    let is_in_tile = is_tiled && state.tiled_tabs.contains(&i);
+                    ui.push_id(&tab.contents.id.0, |ui| {
+                        let is_active = i == state.selected_index;
+                        let is_in_multi = multi_count > 1 && state.selected_tabs.contains(&i);
+                        let is_in_tile = is_tiled && state.tiled_tabs.contains(&i);
 
-                    let mark = if tab.contents.is_dirty { " ●" } else { "" };
-                    let prefix = if is_in_multi || is_in_tile { "✓ " } else { "" };
-                    let label = format!("{prefix}{}{mark}", tab.contents.display_name());
+                        let mark = if tab.contents.is_dirty { " ●" } else { "" };
+                        let prefix = if is_in_multi || is_in_tile { "✓ " } else { "" };
+                        let title = state.tab_title(i);
+                        let label = format!("{prefix}{title}{mark}");
 
-                    let mut rich = egui::RichText::new(label);
-                    if is_active {
-                        rich = rich.strong();
-                    }
-
-                    let resp = ui
-                        .add(
-                            egui::Button::selectable(
-                                is_active || is_in_multi || is_in_tile,
-                                rich,
-                            )
-                            .sense(egui::Sense::click_and_drag()),
-                        )
-                        .on_hover_text(
-                            "Click: select | Ctrl+Click: multi-select | Drag: move/detach to window | Right-click: options",
-                        );
-
-                    tab_rects.push(resp.rect);
-
-                    if resp.drag_started_by(egui::PointerButton::Primary) {
-                        drag_started_tab = Some(i);
-                    }
-
-                    if resp.clicked() {
-                        let mods = ui.input(|inp| inp.modifiers);
-                        if mods.command || mods.ctrl {
-                            action = TabBarAction::ToggleSelect(i);
-                        } else if mods.shift {
-                            action = TabBarAction::SelectRange(i);
-                        } else {
-                            action = TabBarAction::Select(i);
+                        let mut rich = egui::RichText::new(label);
+                        if is_active {
+                            rich = rich.strong();
                         }
-                    }
 
-                    resp.context_menu(|ui| {
-                        let is_selected = state.selected_tabs.contains(&i);
-                        let toggle_label = if is_selected && state.selected_tabs.len() > 1 {
-                            "Deselect Tab (Ctrl+Click)"
-                        } else {
-                            "Add Tab to Selection (Ctrl+Click)"
+                        let hover_text = match &tab.contents.file_path {
+                            Some(p) => format!(
+                                "{}\nClick: select | Ctrl+Click: multi-select | Drag: move/detach to window | Right-click: options",
+                                p.display()
+                            ),
+                            None => "Click: select | Ctrl+Click: multi-select | Drag: move/detach to window | Right-click: options".to_string(),
                         };
-                        if ui.button(toggle_label).clicked() {
-                            action = TabBarAction::ToggleSelect(i);
-                            ui.close();
-                        }
-                        if state.selected_tabs.len() >= 2 {
-                            if ui
-                                .button(format!("Tile Selected Tabs ({})", state.selected_tabs.len()))
-                                .clicked()
-                            {
-                                action = TabBarAction::TileSelected;
-                                ui.close();
-                            }
-                        }
-                        if state.tabs.len() >= 2 {
-                            if ui
-                                .button(format!("Tile All Tabs ({})", state.tabs.len()))
-                                .clicked()
-                            {
-                                action = TabBarAction::TileAll;
-                                ui.close();
-                            }
-                        }
-                        if state.is_tiled() {
-                            if ui.button("Single Tab View (Untile)").clicked() {
-                                action = TabBarAction::Untile;
-                                ui.close();
-                            }
-                        }
-                        ui.separator();
-                        if ui
-                            .add_enabled(
-                                state.tabs.len() >= 2,
-                                egui::Button::new("Move Tab to New Window"),
-                            )
-                            .clicked()
-                        {
-                            action = TabBarAction::DetachToNewWindow(i);
-                            ui.close();
-                        }
-                        if !other_windows.is_empty() {
-                            ui.menu_button("Move Tab to Window", |ui| {
-                                for (target_vp, win_label) in other_windows {
-                                    if ui.button(win_label).clicked() {
-                                        action = TabBarAction::MoveToWindow {
-                                            tab_index: i,
-                                            target_viewport: *target_vp,
-                                        };
-                                        ui.close();
-                                    }
-                                }
-                            });
-                        }
-                        ui.separator();
-                        if ui.button("Close Tab").clicked() {
-                            action = TabBarAction::Close(i);
-                            ui.close();
-                        }
-                    });
 
-                    if ui.small_button("×").clicked() {
-                        action = TabBarAction::Close(i);
-                    }
-                    ui.separator();
+                        let resp = ui
+                            .add(
+                                egui::Button::selectable(
+                                    is_active || is_in_multi || is_in_tile,
+                                    rich,
+                                )
+                                .sense(egui::Sense::click_and_drag()),
+                            )
+                            .on_hover_text(hover_text);
+
+                        tab_rects.push(resp.rect);
+
+                        if resp.drag_started_by(egui::PointerButton::Primary) {
+                            drag_started_tab = Some(i);
+                        }
+
+                        if resp.clicked() {
+                            let mods = ui.input(|inp| inp.modifiers);
+                            if mods.command || mods.ctrl {
+                                action = TabBarAction::ToggleSelect(i);
+                            } else if mods.shift {
+                                action = TabBarAction::SelectRange(i);
+                            } else {
+                                action = TabBarAction::Select(i);
+                            }
+                        }
+
+                        resp.context_menu(|ui| {
+                            let is_selected = state.selected_tabs.contains(&i);
+                            let toggle_label = if is_selected && state.selected_tabs.len() > 1 {
+                                "Deselect Tab (Ctrl+Click)"
+                            } else {
+                                "Add Tab to Selection (Ctrl+Click)"
+                            };
+                            if ui.button(toggle_label).clicked() {
+                                action = TabBarAction::ToggleSelect(i);
+                                ui.close();
+                            }
+                            if state.selected_tabs.len() >= 2 {
+                                if ui
+                                    .button(format!("Tile Selected Tabs ({})", state.selected_tabs.len()))
+                                    .clicked()
+                                {
+                                    action = TabBarAction::TileSelected;
+                                    ui.close();
+                                }
+                            }
+                            if state.tabs.len() >= 2 {
+                                if ui
+                                    .button(format!("Tile All Tabs ({})", state.tabs.len()))
+                                    .clicked()
+                                {
+                                    action = TabBarAction::TileAll;
+                                    ui.close();
+                                }
+                            }
+                            if state.is_tiled() {
+                                if ui.button("Single Tab View (Untile)").clicked() {
+                                    action = TabBarAction::Untile;
+                                    ui.close();
+                                }
+                            }
+                            ui.separator();
+                            if ui
+                                .add_enabled(
+                                    state.tabs.len() >= 2,
+                                    egui::Button::new("Move Tab to New Window"),
+                                )
+                                .clicked()
+                            {
+                                action = TabBarAction::DetachToNewWindow(i);
+                                ui.close();
+                            }
+                            if !other_windows.is_empty() {
+                                ui.menu_button("Move Tab to Window", |ui| {
+                                    for (target_vp, win_label) in other_windows {
+                                        if ui.button(win_label).clicked() {
+                                            action = TabBarAction::MoveToWindow {
+                                                tab_index: i,
+                                                target_viewport: *target_vp,
+                                            };
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                            }
+                            ui.separator();
+                            if ui.button("Close Tab").clicked() {
+                                action = TabBarAction::Close(i);
+                                ui.close();
+                            }
+                        });
+
+                        if ui.small_button("×").clicked() {
+                            action = TabBarAction::Close(i);
+                        }
+                        ui.separator();
+                    });
                 }
 
                 if ui.button("+").on_hover_text("New Tab (Ctrl+N)").clicked() {
@@ -178,6 +188,17 @@ pub fn show(
                 }
 
                 if state.is_tiled() {
+                    ui.separator();
+                    let mut sync_scroll = state.sync_scroll_tiled;
+                    if ui
+                        .checkbox(&mut sync_scroll, "Sync Scroll")
+                        .on_hover_text(
+                            "Synchronize scrolling across tiled tabs relative to their line positions when turned ON",
+                        )
+                        .changed()
+                    {
+                        action = TabBarAction::SetSyncScroll(sync_scroll);
+                    }
                     ui.separator();
                     if ui
                         .button(format!("⬜ Single View (from {})", state.tiled_tabs.len()))
