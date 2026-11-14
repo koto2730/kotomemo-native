@@ -11,13 +11,15 @@ use std::time::Duration;
 const LOCK_FILE: &str = "instance.lock";
 const PORT_FILE: &str = "instance.port";
 
-#[derive(Debug, Serialize, Deserialize)]
-struct IpcMessage {
-    paths: Vec<PathBuf>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IpcMessage {
+    pub paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub memo_mode: bool,
 }
 
 pub struct PrimaryInstance {
-    pub rx: Receiver<Vec<PathBuf>>,
+    pub rx: Receiver<IpcMessage>,
     pub ctx_slot: Arc<OnceLock<egui::Context>>,
     _lock_file: Option<File>,
 }
@@ -37,7 +39,10 @@ impl PrimaryInstance {
 ///   simultaneously spawns one process per selected file via the context menu),
 ///   connects to the primary instance's local TCP port, forwards `initial_paths`,
 ///   and returns `None` so the caller can exit immediately.
-pub fn try_acquire_primary_or_forward(initial_paths: &[PathBuf]) -> Option<PrimaryInstance> {
+pub fn try_acquire_primary_or_forward(
+    initial_paths: &[PathBuf],
+    memo_mode: bool,
+) -> Option<PrimaryInstance> {
     let dir = config::config_dir();
     let _ = fs::create_dir_all(&dir);
     let lock_path = dir.join(LOCK_FILE);
@@ -62,7 +67,7 @@ pub fn try_acquire_primary_or_forward(initial_paths: &[PathBuf]) -> Option<Prima
                             let mut line = String::new();
                             if reader.read_line(&mut line).is_ok() && !line.trim().is_empty() {
                                 if let Ok(msg) = serde_json::from_str::<IpcMessage>(&line) {
-                                    let _ = tx.send(msg.paths);
+                                    let _ = tx.send(msg);
                                     if let Some(ctx) = ctx_for_thread.get() {
                                         ctx.request_repaint();
                                     }
@@ -90,6 +95,7 @@ pub fn try_acquire_primary_or_forward(initial_paths: &[PathBuf]) -> Option<Prima
             // `instance.port`.
             let payload = serde_json::to_string(&IpcMessage {
                 paths: initial_paths.to_vec(),
+                memo_mode,
             })
             .unwrap_or_default()
                 + "\n";
@@ -98,7 +104,9 @@ pub fn try_acquire_primary_or_forward(initial_paths: &[PathBuf]) -> Option<Prima
                 if let Ok(port_str) = fs::read_to_string(&port_path) {
                     if let Ok(port) = port_str.trim().parse::<u16>() {
                         let addr = SocketAddr::from(([127, 0, 0, 1], port));
-                        if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(200)) {
+                        if let Ok(mut stream) =
+                            TcpStream::connect_timeout(&addr, Duration::from_millis(200))
+                        {
                             let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
                             if stream.write_all(payload.as_bytes()).is_ok() {
                                 let _ = stream.flush();
@@ -115,7 +123,10 @@ pub fn try_acquire_primary_or_forward(initial_paths: &[PathBuf]) -> Option<Prima
 }
 
 #[cfg(windows)]
-fn try_lock_exclusive(lock_path: & std::path::Path, _port_path: &std::path::Path) -> Option<Option<File>> {
+fn try_lock_exclusive(
+    lock_path: &std::path::Path,
+    _port_path: &std::path::Path,
+) -> Option<Option<File>> {
     use std::os::windows::fs::OpenOptionsExt;
     match fs::OpenOptions::new()
         .create(true)
@@ -130,7 +141,10 @@ fn try_lock_exclusive(lock_path: & std::path::Path, _port_path: &std::path::Path
 }
 
 #[cfg(not(windows))]
-fn try_lock_exclusive(lock_path: &std::path::Path, port_path: &std::path::Path) -> Option<Option<File>> {
+fn try_lock_exclusive(
+    lock_path: &std::path::Path,
+    port_path: &std::path::Path,
+) -> Option<Option<File>> {
     if let Ok(port_str) = fs::read_to_string(port_path) {
         if let Ok(port) = port_str.trim().parse::<u16>() {
             let addr = SocketAddr::from(([127, 0, 0, 1], port));

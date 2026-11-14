@@ -111,8 +111,11 @@ impl TabState {
     }
 
     pub fn undo(&mut self) {
-        let Some(prev) = self.undo_stack.pop() else { return };
-        self.redo_stack.push(std::mem::replace(&mut self.text, prev));
+        let Some(prev) = self.undo_stack.pop() else {
+            return;
+        };
+        self.redo_stack
+            .push(std::mem::replace(&mut self.text, prev));
         // Undo always force-dirties, even when it lands back on the exact
         // last-saved text — it does not restore the dirty flag's prior
         // value, matching Kotlin's `contents.copy(text = ..., isDirty = true)`.
@@ -121,8 +124,11 @@ impl TabState {
     }
 
     pub fn redo(&mut self) {
-        let Some(next) = self.redo_stack.pop() else { return };
-        self.undo_stack.push(std::mem::replace(&mut self.text, next));
+        let Some(next) = self.redo_stack.pop() else {
+            return;
+        };
+        self.undo_stack
+            .push(std::mem::replace(&mut self.text, next));
         self.contents.text = self.text.clone();
         self.contents.is_dirty = true;
     }
@@ -163,6 +169,10 @@ pub struct EditorState {
     pub sync_scroll_tiled: bool,
     /// Relative scroll delta (in lines) from each tiled tab's `sync_anchor_line`.
     pub sync_scroll_delta_lines: f32,
+    /// When enabled (via `-memo` CLI flag or the menu bar checkbox), closing
+    /// dirty tabs or the window skips the "Save changes?" confirmation prompt.
+    /// Manual saving (`Ctrl+S`, `File -> Save`) still works normally.
+    pub memo_mode: bool,
     pub show_line_numbers: bool,
     pub word_wrap: bool,
     pub editor_font: EditorFont,
@@ -222,6 +232,7 @@ impl EditorState {
             tiled_tabs: Vec::new(),
             sync_scroll_tiled: false,
             sync_scroll_delta_lines: 0.0,
+            memo_mode: false,
             show_line_numbers,
             word_wrap,
             editor_font,
@@ -294,7 +305,10 @@ impl EditorState {
                 .file_path
                 .as_deref()
                 .and_then(|p| p.parent())
-                .and_then(|p| p.file_name().or_else(|| p.as_os_str().to_str().map(std::ffi::OsStr::new)))
+                .and_then(|p| {
+                    p.file_name()
+                        .or_else(|| p.as_os_str().to_str().map(std::ffi::OsStr::new))
+                })
                 .and_then(|s| s.to_str())
                 .filter(|s| !s.is_empty())
             {
@@ -354,7 +368,9 @@ impl EditorState {
         if index >= self.tabs.len() {
             return;
         }
-        if !self.selected_tabs.contains(&self.selected_index) && self.selected_index < self.tabs.len() {
+        if !self.selected_tabs.contains(&self.selected_index)
+            && self.selected_index < self.tabs.len()
+        {
             self.selected_tabs.push(self.selected_index);
         }
         if let Some(pos) = self.selected_tabs.iter().position(|&i| i == index) {
@@ -459,6 +475,7 @@ impl EditorState {
             tiled_tabs: Vec::new(),
             sync_scroll_tiled: false,
             sync_scroll_delta_lines: 0.0,
+            memo_mode: self.memo_mode,
             show_line_numbers: self.show_line_numbers,
             word_wrap: self.word_wrap,
             editor_font: self.editor_font.clone(),
@@ -685,7 +702,11 @@ impl EditorState {
     }
 
     pub fn save_current(&mut self, target_path: Option<PathBuf>) -> std::io::Result<()> {
-        let Some(index) = self.tabs.get(self.selected_index).map(|_| self.selected_index) else {
+        let Some(index) = self
+            .tabs
+            .get(self.selected_index)
+            .map(|_| self.selected_index)
+        else {
             return Ok(());
         };
         let tab = &self.tabs[index];
@@ -752,7 +773,9 @@ impl EditorState {
     /// Ports `EditorState.runFind` exactly.
     pub fn run_find(&mut self) {
         let index = self.selected_index;
-        let Some(tab) = self.tabs.get(index) else { return };
+        let Some(tab) = self.tabs.get(index) else {
+            return;
+        };
         let chars: Vec<char> = tab.text.chars().collect();
         let len = chars.len();
         let (search_from, search_to) = match self.finder.scope {
@@ -791,7 +814,10 @@ impl EditorState {
         } else {
             cursor
         };
-        let next_after = matches.iter().find(|(start, _)| *start >= effective_cursor).copied();
+        let next_after = matches
+            .iter()
+            .find(|(start, _)| *start >= effective_cursor)
+            .copied();
         let target = next_after.unwrap_or(matches[0]);
         self.finder.wrapped_around = next_after.is_none();
 
@@ -807,7 +833,9 @@ impl EditorState {
     /// the editor focus or advancing past the current match.
     pub fn refresh_find_count(&mut self) {
         let index = self.selected_index;
-        let Some(tab) = self.tabs.get(index) else { return };
+        let Some(tab) = self.tabs.get(index) else {
+            return;
+        };
         let chars: Vec<char> = tab.text.chars().collect();
         let len = chars.len();
         let (search_from, search_to) = match self.finder.scope {
@@ -833,7 +861,9 @@ impl EditorState {
     /// `EditorState.runReplaceOne` exactly.
     pub fn run_replace_one(&mut self) {
         let index = self.selected_index;
-        let Some(tab) = self.tabs.get(index) else { return };
+        let Some(tab) = self.tabs.get(index) else {
+            return;
+        };
         let (sel_min, sel_max) = tab.selection;
         if sel_min == sel_max {
             self.run_find();
@@ -888,7 +918,9 @@ impl EditorState {
     /// `EditorState.runReplaceAll` exactly.
     pub fn run_replace_all(&mut self) {
         let index = self.selected_index;
-        let Some(tab) = self.tabs.get(index) else { return };
+        let Some(tab) = self.tabs.get(index) else {
+            return;
+        };
         let full_text = tab.text.clone();
         let chars: Vec<char> = full_text.chars().collect();
         let len = chars.len();
@@ -944,7 +976,10 @@ impl EditorState {
     /// Ports `EditorState.pasteImage` (the private overload).
     pub fn paste_clipboard_image(&mut self, image: RgbaImage) {
         let Some(tab) = self.current() else { return };
-        match attachments::folder_for(tab.contents.file_path.as_deref(), &self.app_config.attachments_folder) {
+        match attachments::folder_for(
+            tab.contents.file_path.as_deref(),
+            &self.app_config.attachments_folder,
+        ) {
             None => self.pending_image_for_attach = Some(image),
             Some(folder) => self.save_pasted_image(folder, image),
         }
@@ -953,9 +988,14 @@ impl EditorState {
     /// Called after `SaveFirstDialog`'s "Save Now…" successfully saves the
     /// tab. Ports `EditorState.attachPendingImage`.
     pub fn attach_pending_image(&mut self) {
-        let Some(image) = self.pending_image_for_attach.take() else { return };
+        let Some(image) = self.pending_image_for_attach.take() else {
+            return;
+        };
         let Some(tab) = self.current() else { return };
-        let Some(folder) = attachments::folder_for(tab.contents.file_path.as_deref(), &self.app_config.attachments_folder) else {
+        let Some(folder) = attachments::folder_for(
+            tab.contents.file_path.as_deref(),
+            &self.app_config.attachments_folder,
+        ) else {
             return;
         };
         self.save_pasted_image(folder, image);
@@ -982,7 +1022,9 @@ impl EditorState {
                 now.minute(),
                 now.second()
             );
-            image.save(folder.join(&filename)).map_err(|e| e.to_string())?;
+            image
+                .save(folder.join(&filename))
+                .map_err(|e| e.to_string())?;
             Ok(filename)
         })();
 
@@ -1015,7 +1057,6 @@ impl EditorState {
     /// its own schedule, it doesn't watch arbitrary background state).
     /// Ports `EditorState.sendWithPreset`.
 
-
     pub fn send_with_preset_at(&mut self, preset: ApiPreset, sel_start: usize, sel_end: usize) {
         if self.send_busy {
             return;
@@ -1024,7 +1065,11 @@ impl EditorState {
         let selected_text = if sel_start == sel_end {
             tab.text.clone()
         } else {
-            tab.text.chars().skip(sel_start).take(sel_end - sel_start).collect()
+            tab.text
+                .chars()
+                .skip(sel_start)
+                .take(sel_end - sel_start)
+                .collect()
         };
         let filename = tab.contents.display_name();
         let tokens = self.app_config.tokens.clone();
@@ -1064,7 +1109,9 @@ impl EditorState {
     /// waiting, so the UI notices the result promptly instead of only on
     /// the next input-driven redraw.
     pub fn poll_send_result(&mut self, ctx: &egui::Context) {
-        let Some(rx) = &self.send_result_rx else { return };
+        let Some(rx) = &self.send_result_rx else {
+            return;
+        };
         match rx.try_recv() {
             Ok(outcome) => {
                 self.send_result_rx = None;
@@ -1083,19 +1130,26 @@ impl EditorState {
 
     fn handle_send_result(&mut self, outcome: SendOutcome) {
         match outcome.output {
-            SendOutput::Failure { message, raw_body, .. } => {
+            SendOutput::Failure {
+                message, raw_body, ..
+            } => {
                 // The status bar is the only place a failed send shows up,
                 // so fold in a snippet of the response body — "HTTP 400"
                 // alone gives no hint that e.g. the body template produced
                 // invalid JSON, which the server's error message usually
                 // says outright.
-                let snippet = raw_body.as_deref().map(collapse_whitespace).filter(|s| !s.is_empty());
+                let snippet = raw_body
+                    .as_deref()
+                    .map(collapse_whitespace)
+                    .filter(|s| !s.is_empty());
                 self.send_status = Some(match snippet {
                     Some(s) => format!("Send failed: {message} - {s}"),
                     None => format!("Send failed: {message}"),
                 });
             }
-            SendOutput::Success { extracted, status, .. } => {
+            SendOutput::Success {
+                extracted, status, ..
+            } => {
                 self.send_status = Some(format!("Send OK ({status})"));
                 match outcome.preset.response_target {
                     ResponseTarget::NewTab => {
@@ -1120,7 +1174,9 @@ impl EditorState {
 
     fn insert_after_selection(&mut self, sel_start: usize, sel_end: usize, response: &str) {
         let index = self.selected_index;
-        let Some(tab) = self.tabs.get(index) else { return };
+        let Some(tab) = self.tabs.get(index) else {
+            return;
+        };
         // HTTP servers default to CRLF. Normalise to LF so the buffer
         // invariant (logical LF only) holds.
         let normalized = response.replace("\r\n", "\n").replace('\r', "\n");
@@ -1152,7 +1208,13 @@ impl EditorState {
 }
 
 fn collapse_whitespace(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ").trim().chars().take(160).collect()
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .chars()
+        .take(160)
+        .collect()
 }
 
 #[cfg(test)]
@@ -1235,7 +1297,9 @@ mod tests {
         assert_eq!(win2.tabs[0].text, "gamma");
 
         // Merge "gamma" from win2 back into win1 (allowing win2 to become empty)
-        let merged = win2.extract_tab(0, false).expect("should extract last tab when allowed");
+        let merged = win2
+            .extract_tab(0, false)
+            .expect("should extract last tab when allowed");
         assert!(win2.tabs.is_empty());
         win1.insert_tab(merged);
         assert_eq!(win1.tabs.len(), 3);

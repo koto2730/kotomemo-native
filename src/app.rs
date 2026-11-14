@@ -14,8 +14,8 @@ use crate::ui::{
 };
 use egui::{FontId, Key, ViewportId};
 use std::path::PathBuf;
-use std::sync::mpsc::TryRecvError;
 use std::sync::Arc;
+use std::sync::mpsc::TryRecvError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DragTarget {
@@ -70,8 +70,9 @@ struct EditorWindow {
 }
 
 impl EditorWindow {
-    fn new_root(initial_paths: Vec<PathBuf>) -> Self {
+    fn new_root(initial_paths: Vec<PathBuf>, memo_mode: bool) -> Self {
         let mut state = EditorState::new();
+        state.memo_mode = memo_mode;
         for path in &initial_paths {
             let _ = state.open_or_prepare(path);
         }
@@ -211,7 +212,7 @@ impl EditorWindow {
 
     fn request_close_tab(&mut self, index: usize) {
         if let Some(tab) = self.state.tabs.get(index) {
-            if tab.contents.is_dirty {
+            if tab.contents.is_dirty && !self.state.memo_mode {
                 self.close_tab_confirm = Some(index);
             } else {
                 self.state.close_tab(index);
@@ -452,7 +453,7 @@ impl EditorWindow {
             .send_viewport_cmd(egui::ViewportCommand::Title(self.window_title()));
 
         if close_requested {
-            if !self.bypass_close_confirm {
+            if !self.bypass_close_confirm && !self.state.memo_mode {
                 let has_dirty = self.state.tabs.iter().any(|t| t.contents.is_dirty);
                 if has_dirty {
                     ui.ctx()
@@ -476,19 +477,19 @@ impl EditorWindow {
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.menu_button("File", |ui| {
-                    if ui.button("New Tab (Ctrl+N)").clicked() {
+                    if ui.add(egui::Button::new("New Tab").shortcut_text("Ctrl+N")).clicked() {
                         self.state.new_tab();
                         ui.close();
                     }
-                    if ui.button("New Window (Ctrl+Shift+N)").clicked() {
+                    if ui.add(egui::Button::new("New Window").shortcut_text("Ctrl+Shift+N")).clicked() {
                         win_cmd = WindowCommand::OpenNewBlankWindow;
                         ui.close();
                     }
-                    if ui.button("Open…").clicked() {
+                    if ui.add(egui::Button::new("Open…").shortcut_text("Ctrl+O")).clicked() {
                         self.open_dialog();
                         ui.close();
                     }
-                    if ui.button("Save").clicked() {
+                    if ui.add(egui::Button::new("Save").shortcut_text("Ctrl+S")).clicked() {
                         self.save();
                         ui.close();
                     }
@@ -497,12 +498,12 @@ impl EditorWindow {
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button("Close Tab").clicked() {
+                    if ui.add(egui::Button::new("Close Tab").shortcut_text("Ctrl+W")).clicked() {
                         self.request_close_tab(self.state.selected_index);
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button("Close Window").clicked() {
+                    if ui.add(egui::Button::new("Close Window").shortcut_text("Ctrl+Q")).clicked() {
                         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                         ui.close();
                     }
@@ -511,20 +512,20 @@ impl EditorWindow {
                 ui.menu_button("Edit", |ui| {
                     let can_undo = self.state.current().is_some_and(|t| t.can_undo());
                     let can_redo = self.state.current().is_some_and(|t| t.can_redo());
-                    if ui.add_enabled(can_undo, egui::Button::new("Undo")).clicked() {
+                    if ui.add_enabled(can_undo, egui::Button::new("Undo").shortcut_text("Ctrl+Z")).clicked() {
                         if let Some(tab) = self.state.current_mut() {
                             tab.undo();
                         }
                         ui.close();
                     }
-                    if ui.add_enabled(can_redo, egui::Button::new("Redo")).clicked() {
+                    if ui.add_enabled(can_redo, egui::Button::new("Redo").shortcut_text("Ctrl+Y")).clicked() {
                         if let Some(tab) = self.state.current_mut() {
                             tab.redo();
                         }
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button("Select All").clicked() {
+                    if ui.add(egui::Button::new("Select All").shortcut_text("Ctrl+A")).clicked() {
                         if let Some(tab) = self.state.current_mut() {
                             let len = tab.text.chars().count();
                             tab.pending_selection = Some((0, len));
@@ -532,7 +533,7 @@ impl EditorWindow {
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button("Find…").clicked() {
+                    if ui.add(egui::Button::new("Find…").shortcut_text("Ctrl+F")).clicked() {
                         let selection = self.state.current().map(|t| t.selection);
                         self.state.finder.toggle_find(selection);
                         if self.state.finder.visible {
@@ -540,7 +541,7 @@ impl EditorWindow {
                         }
                         ui.close();
                     }
-                    if ui.button("Replace…").clicked() {
+                    if ui.add(egui::Button::new("Replace…").shortcut_text("Ctrl+H")).clicked() {
                         let selection = self.state.current().map(|t| t.selection);
                         self.state.finder.toggle_replace(selection);
                         if self.state.finder.visible {
@@ -550,7 +551,7 @@ impl EditorWindow {
                     }
                     ui.separator();
                     if ui
-                        .button("Paste Image")
+                        .add(egui::Button::new("Paste Image").shortcut_text("Ctrl+V"))
                         .on_hover_text("Attach image from clipboard")
                         .clicked()
                     {
@@ -571,10 +572,8 @@ impl EditorWindow {
                         ui.close();
                     }
                     if ui
-                        .add(egui::Button::selectable(
-                            self.state.word_wrap,
-                            "Word Wrap (Alt+Z)",
-                        ))
+                        .add(egui::Button::selectable(self.state.word_wrap, "Word Wrap")
+                            .shortcut_text("Alt+Z"))
                         .clicked()
                     {
                         self.state.toggle_word_wrap();
@@ -705,15 +704,15 @@ impl EditorWindow {
                         });
                     }
                     ui.separator();
-                    if ui.button("Zoom In").clicked() {
+                    if ui.add(egui::Button::new("Zoom In").shortcut_text("Ctrl+=")).clicked() {
                         self.state.zoom_in();
                         ui.close();
                     }
-                    if ui.button("Zoom Out").clicked() {
+                    if ui.add(egui::Button::new("Zoom Out").shortcut_text("Ctrl+-")).clicked() {
                         self.state.zoom_out();
                         ui.close();
                     }
-                    if ui.button("Reset Zoom (100%)").clicked() {
+                    if ui.add(egui::Button::new("Reset Zoom (100%)").shortcut_text("Ctrl+0")).clicked() {
                         self.state.zoom_reset();
                         ui.close();
                     }
@@ -724,11 +723,11 @@ impl EditorWindow {
                     }
                     ui.separator();
                     if let Some(tab) = self.state.current_mut() {
-                        if ui.button("Text view").clicked() {
+                        if ui.add(egui::Button::new("Text view").shortcut_text("Ctrl+1")).clicked() {
                             tab.view_mode = TabViewMode::Text;
                             ui.close();
                         }
-                        if ui.button("Images view").clicked() {
+                        if ui.add(egui::Button::new("Images view").shortcut_text("Ctrl+2")).clicked() {
                             tab.view_mode = TabViewMode::Images;
                             ui.close();
                         }
@@ -737,10 +736,8 @@ impl EditorWindow {
 
                 ui.menu_button("Format", |ui| {
                     if ui
-                        .add(egui::Button::selectable(
-                            self.state.word_wrap,
-                            "Word Wrap (Alt+Z)",
-                        ))
+                        .add(egui::Button::selectable(self.state.word_wrap, "Word Wrap")
+                            .shortcut_text("Alt+Z"))
                         .clicked()
                     {
                         self.state.toggle_word_wrap();
@@ -864,7 +861,7 @@ impl EditorWindow {
                         }
                     }
                     ui.separator();
-                    if ui.button("Send palette…").on_hover_text("Ctrl+;").clicked() {
+                    if ui.add(egui::Button::new("Send palette…").shortcut_text("Ctrl+;")).clicked() {
                         let (sel_start, sel_end, cursor_pos) =
                             if let Some(tab) = self.state.current() {
                                 let id_salt = egui::Id::new(&tab.contents.id.0);
@@ -899,6 +896,12 @@ impl EditorWindow {
                         ui.close();
                     }
                 });
+
+                ui.separator();
+                ui.checkbox(&mut self.state.memo_mode, "Memo Mode")
+                    .on_hover_text(
+                        "Memo Mode (-memo): Do not ask to save unsaved changes when closing tabs or window (Ctrl+S / File -> Save still works)",
+                    );
             });
 
             if let Some(tab_title) = incoming_drop_tab_title {
@@ -1201,10 +1204,7 @@ impl EditorWindow {
                         .clicked()
                     {
                         if let Some(file) = rfd::FileDialog::new()
-                            .add_filter(
-                                "Font Files",
-                                &["ttf", "otf", "ttc", "TTF", "OTF", "TTC"],
-                            )
+                            .add_filter("Font Files", &["ttf", "otf", "ttc", "TTF", "OTF", "TTC"])
                             .pick_file()
                         {
                             self.state.font_config.selection = FontSelection::Custom {
@@ -1233,8 +1233,7 @@ impl EditorWindow {
                         }
                         if ui.button("Reset (14 pt)").clicked() {
                             self.state.font_config.size = FontConfig::default().size;
-                            self.state.editor_font.size =
-                                FontConfig::default().size.round() as i32;
+                            self.state.editor_font.size = FontConfig::default().size.round() as i32;
                             changed = true;
                         }
                     });
@@ -1246,10 +1245,8 @@ impl EditorWindow {
                         self.state.editor_font.family.to_egui_family(),
                     );
                     ui.label(
-                        egui::RichText::new(
-                            "ASCII: 0123456789 ABCDEFG abcdefg !@#$%^&*()_+-=[]{}",
-                        )
-                        .font(preview_font.clone()),
+                        egui::RichText::new("ASCII: 0123456789 ABCDEFG abcdefg !@#$%^&*()_+-=[]{}")
+                            .font(preview_font.clone()),
                     );
                     ui.label(
                         egui::RichText::new(
@@ -1298,8 +1295,8 @@ impl EditorWindow {
         let mut close_tab_req: Option<usize> = None;
         let mut move_tiled_req: Option<(usize, isize)> = None;
 
-        let central_frame = egui::Frame::central_panel(ui.style())
-            .fill(ui.visuals().extreme_bg_color);
+        let central_frame =
+            egui::Frame::central_panel(ui.style()).fill(ui.visuals().extreme_bg_color);
         egui::CentralPanel::default().frame(central_frame).show(ui, |ui| {
             let tiled_indices: Vec<usize> = if self.state.is_tiled() {
                 self.state
@@ -1575,10 +1572,11 @@ pub struct KotomemoApp {
 impl KotomemoApp {
     pub fn new(
         initial_paths: Vec<PathBuf>,
+        memo_mode: bool,
         primary_ipc: Option<PrimaryInstance>,
         icon: Arc<egui::IconData>,
     ) -> Self {
-        let root_win = EditorWindow::new_root(initial_paths);
+        let root_win = EditorWindow::new_root(initial_paths, memo_mode);
         Self {
             windows: vec![root_win],
             last_focused_viewport: ViewportId::ROOT,
@@ -1593,7 +1591,7 @@ impl KotomemoApp {
         let Some(ipc) = &self.primary_ipc else { return };
         loop {
             match ipc.rx.try_recv() {
-                Ok(paths) => {
+                Ok(msg) => {
                     // Find the most recently active visible window, falling back to
                     // the last visible window.
                     let target_idx = self
@@ -1607,10 +1605,13 @@ impl KotomemoApp {
                         if !win.visible {
                             win.visible = true;
                         }
-                        if paths.is_empty() {
+                        if msg.memo_mode {
+                            win.state.memo_mode = true;
+                        }
+                        if msg.paths.is_empty() {
                             win.state.new_tab();
                         } else {
-                            for path in &paths {
+                            for path in &msg.paths {
                                 let _ = win.state.open_or_prepare(path);
                             }
                             win.state.close_initial_empty_if_possible();
@@ -1694,9 +1695,7 @@ impl KotomemoApp {
             .last_inner_rect
             .map(|r| r.size())
             .unwrap_or(win.initial_size);
-        let default_pos = win
-            .last_outer_rect
-            .map(|r| r.min + egui::vec2(36.0, 36.0));
+        let default_pos = win.last_outer_rect.map(|r| r.min + egui::vec2(36.0, 36.0));
 
         // If the dragged tab is part of a multi-selection, move all selected tabs
         // (unless keep_at_least_one is true and all tabs are selected, in which
@@ -1748,8 +1747,9 @@ impl KotomemoApp {
                             .map(|r| r.size())
                             .unwrap_or(w.initial_size);
                         (
-                            w.state
-                                .from_template_with_tabs(vec![TabState::new(crate::entity::Contents::empty())]),
+                            w.state.from_template_with_tabs(vec![TabState::new(
+                                crate::entity::Contents::empty(),
+                            )]),
                             pos,
                             size,
                         )
@@ -1777,10 +1777,7 @@ impl KotomemoApp {
                     let vp_id = ViewportId::from_hash_of(format!("kotomemo_win_{seq}"));
                     let spawn_pos = pos.or(default_pos);
                     self.windows.push(EditorWindow::new_secondary(
-                        vp_id,
-                        new_state,
-                        spawn_pos,
-                        size,
+                        vp_id, new_state, spawn_pos, size,
                     ));
                     self.last_focused_viewport = vp_id;
                 }
@@ -1930,8 +1927,7 @@ impl eframe::App for KotomemoApp {
                     _ => None,
                 };
 
-                let (cmd, drag_start) =
-                    root_win.render(ui, &others, incoming_drop, outgoing_hint);
+                let (cmd, drag_start) = root_win.render(ui, &others, incoming_drop, outgoing_hint);
                 if !matches!(cmd, WindowCommand::None) {
                     pending_commands.push(cmd);
                 }
@@ -1989,10 +1985,9 @@ impl eframe::App for KotomemoApp {
                 }
                 if let Some(drag) = &mut self.active_tab_drag {
                     if drag.source_viewport == vp_id {
-                        if let (Some(inner), Some(local)) = (
-                            win.last_inner_rect,
-                            vp_ui.input(|i| i.pointer.latest_pos()),
-                        ) {
+                        if let (Some(inner), Some(local)) =
+                            (win.last_inner_rect, vp_ui.input(|i| i.pointer.latest_pos()))
+                        {
                             drag.current_global_pos = inner.min + local.to_vec2();
                         }
                     }
