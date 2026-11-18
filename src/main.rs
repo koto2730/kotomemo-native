@@ -56,6 +56,26 @@ fn parse_cli_args<I: IntoIterator<Item = String>>(
     (initial_paths, memo_mode)
 }
 
+/// egui's default wgpu device request asks for the standard limits (e.g.
+/// `max_inter_stage_shader_variables: 16`). Some GPUs/drivers (e.g. ARM
+/// devices) only support less (15) and then fail with `LimitsExceeded`.
+/// Clamp the request to what the selected adapter actually supports: devices
+/// that support the defaults keep them unchanged, others get their own maximum.
+fn wgpu_options_with_adapter_limits() -> eframe::egui_wgpu::WgpuConfiguration {
+    use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup};
+
+    let mut options = WgpuConfiguration::default();
+    if let WgpuSetup::CreateNew(setup) = &mut options.wgpu_setup {
+        let base = Arc::clone(&setup.device_descriptor);
+        setup.device_descriptor = Arc::new(move |adapter| {
+            let mut desc = base(adapter);
+            desc.required_limits = desc.required_limits.or_worse_values_from(&adapter.limits());
+            desc
+        });
+    }
+    options
+}
+
 fn main() -> eframe::Result {
     // CLI-arg files (e.g. `kotomemo path/to/file.txt`, or "Open
     // with" registration) plus `-memo` flag:
@@ -73,6 +93,7 @@ fn main() -> eframe::Result {
             .with_inner_size([900.0, 700.0])
             .with_title("kotomemo")
             .with_icon(Arc::clone(&icon)),
+        wgpu_options: wgpu_options_with_adapter_limits(),
         ..Default::default()
     };
     eframe::run_native(
